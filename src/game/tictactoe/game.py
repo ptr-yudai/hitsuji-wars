@@ -55,6 +55,7 @@ class TicTacToe(GameBase):
           If you throw an exception in this method, the sender of this move
           will lose and the game ends.
         """
+        assert self.turn == pid
         assert 'x' in inp and inp['x'] in [0, 1, 2], "Invalid position"
         assert 'y' in inp and inp['y'] in [0, 1, 2], "Invalid position"
         x, y = inp['x'], inp['y']
@@ -62,6 +63,7 @@ class TicTacToe(GameBase):
         assert self.board[y][x] == -1, "Already taken by the opponent"
 
         self.board[y][x] = pid
+        self.turn ^= 1
 
     def share_state(self, pid):
         """Share the current state to a player
@@ -71,8 +73,15 @@ class TicTacToe(GameBase):
         Args:
           pid (int): Player ID to share the state with.
         """
+        return self.board
 
-    
+    def next_players(self):
+        """Decide next players to receive inputs from
+
+        Returns:
+          This method must return a list of player IDs.
+        """
+        return [ self.turn ]
 
     def state(self):
         """Return the current state of the game
