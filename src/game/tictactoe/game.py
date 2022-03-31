@@ -25,14 +25,14 @@ class TicTacToe(GameBase):
         # Check horizontal and vertical
         for i in range(3):
             if self.board[i][0] == self.board[i][1] == self.board[i][2]:
-                return [ self.board[i][0] ]
+                return [ 1 if self.board[i][0] == i else 0 for i in range(2) ]
             if self.board[0][i] == self.board[1][i] == self.board[2][i]:
-                return [ self.board[0][i] ]
+                return [ 1 if self.board[0][i] == i else 0 for i in range(2) ]
 
         # Check diagonal
         if self.board[0][0] == self.board[1][1] == self.board[2][2] \
            or self.board[0][2] == self.board[1][1] == self.board[2][0]:
-            return self.board[1][1]
+            return [ 1 if self.board[1][1] == i else 0 for i in range(2) ]
 
         return False
 
