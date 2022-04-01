@@ -16,6 +16,11 @@ class GameBase(metaclass=ABCMeta):
     def state(self) -> object:
         raise NotImplementedError("'state' is not implemented in this game")
 
+    @classmethod
+    @abstractmethod
+    def name(cls) -> str:
+        pass
+
     @abstractmethod
     def initialize(self, setting:object):
         pass
