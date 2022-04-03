@@ -3,32 +3,54 @@ import glob
 import importlib
 import json
 import os
-import socket, threading
-from logging import getLogger, StreamHandler, DEBUG
 import selectors
-import json
+import socket
+import threading
+from logging import getLogger, StreamHandler, DEBUG
 from platform.game import GameBase
 from typing import Any, NewType
 
 GameConstructor = NewType("GameConstructor", Any)
 
+HOST = os.getenv('HOST', 'localhost')
+PORT = int(os.getenv('PORT', '18880'))
 
-PORT = 18880
 logger = getLogger(__name__)
 handler = StreamHandler()
 handler.setLevel(DEBUG)
 logger.setLevel(DEBUG)
 logger.addHandler(handler)
 
-def recv(sock) -> bytes:
-    return sock.recv(4096)
+def recvline(sock) -> bytes:
+    """Receive a line of data
+
+    Receive data from a socket until it reads '\n'
+    """
+    data = b''
+    while True:
+        c = sock.recv(1)
+        if c == b'\n': break
+        data += c
+    return data
 
 def recv_data(sock):
-    return json.loads(recv(sock).decode())
+    """Receive a JSON data
+    """
+    return json.loads(recvline(sock).decode())
 
 def send_data(sock, msg):
+    """Send JSON to client
+    """
+    msg['_result'] = 'success'
     sock.sendall(json.dumps(msg).encode())
 
+def send_error(sock, msg):
+    """Send error message to client
+    """
+    data = {'_result': 'error', '_reason': msg}
+    sock.sendall(json.dumps(data).encode())
+    sock.close()
+    raise Exception(msg)
 
 # https://www.oreilly.com/library/view/python-cookbook/0596001673/ch06s04.html
 class ReadWriteLock():
@@ -77,9 +99,13 @@ connections = {}
 connections_lock = ReadWriteLock()
 
 def start_game(game_class: GameConstructor, players):
+    """Game manager
+
+    Start a new game
+    """
     sock_by_id = {player[0]:player[1] for player in players}
 
-    # initialize
+    # Initialize game
     game = game_class(list(sock_by_id.keys()))
     msgs = game.init()
 
@@ -111,36 +137,51 @@ def start_game(game_class: GameConstructor, players):
         sock_by_id[player_id].close()
 
 
-def handle_connection(sock):
-    buf = recv(sock)
+def handle_connection(sock, client_host: str):
+    """Handle new connection from client
+    """
     try:
-        # data = { name, game }
-        data = json.loads(buf.decode())
+        # Receive client data
+        data = json.loads(recvline(sock).decode())
+        if 'game' not in data:
+            send_error(sock, "Game not specified")
+        if 'name' not in data:
+            send_error(sock, "Your name not given")
+        if not isinstance(data['game'], str):
+            send_error(sock, "Game name must be string")
+        if not isinstance(data['name'], str):
+            send_error(sock, "Client name must be string")
+
         game = data["game"]
         name = data["name"]
 
+        # Lookup game
         known_games_lock.acquire_read()
         is_known_game = game in known_games
         known_games_lock.release_read()
         if not is_known_game:
-            logger.debug("unknown game {}. connection close.".format(data["game"]))
-            sock.close()
-            return
+            send_error(sock, f"Game '{data['game']}' not found")
 
+        # If everything is valid, add to client list
         connections_lock.acquire_write()
         if game not in connections:
             connections[game] = []
         connections[game].append((name, sock))
 
+        # Check if we can start the game
         cnt = known_games[game].PLAYER_COUNT
         if len(connections[game]) >= cnt:
-            # 十分なプレイヤーが集まったのでゲーム用のスレッドを建ててそちらに任せる
-            threading.Thread(target=start_game, args=(known_games[game], connections[game][:cnt])).start()
+            # Pass to game manager
+            threading.Thread(
+                target=start_game,
+                args=(known_games[game], connections[game][:cnt])
+            ).start()
             connections[game] = connections[game][cnt:]
         connections_lock.release_write()
 
     except Exception as e:
-        logger.debug("invalid data. connection close {}".format(e))
+        logger.error(f"Error: {e}")
+        logger.error(f"Connection closed ({client_host})")
         sock.close()
         return
 
@@ -161,20 +202,29 @@ def load_all(root_dir: str) -> dict[str, GameConstructor]:
     """Load every game from game root directory
     """
     known_games = {}
+
+    # Strip the leading './'
+    if root_dir.startswith("./"):
+        root_dir = root_dir[2:]
+
     for game_dir in glob.iglob(f"{root_dir}/*"):
         if not os.path.isdir(game_dir): continue
         try:
             game = load_game(game_dir)
             known_games[game.name()] = game
         except Exception as e:
-            print(f"[-] Could not load a game: {e}")
+            logger.error(f"Could not load a game: {e}")
+
     return known_games
 
 def main():
     global known_games
-    known_games = load_game("./game/")
+    known_games = load_all("./game/")
 
+    # Setup socket
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     s.bind(('0.0.0.0', PORT))
     s.setblocking(False)
     s.listen(128)
@@ -186,10 +236,9 @@ def main():
         events = selector.select()
         for key, _ in events:
             sock, addr = key.fileobj.accept()
-            sock.setblocking(False)
-            logger.debug("connection from {}".format(addr))
+            logger.debug(f"New connection from {addr[0]}:{addr[1]}")
 
-            threading.Thread(target=handle_connection, args=(sock,)).start()
+            threading.Thread(target=handle_connection, args=(sock, addr)).start()
 
 if __name__ == '__main__':
     main()
