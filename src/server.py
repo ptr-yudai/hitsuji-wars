@@ -6,20 +6,16 @@ import os
 import selectors
 import socket
 import threading
-from logging import getLogger, StreamHandler, DEBUG
+from console.logger import logger
+from mutex.rwlock import ReadWriteLock
 from platform.game import GameBase
 from typing import Any, NewType
 
 GameConstructor = NewType("GameConstructor", Any)
+logger.level = 3
 
 HOST = os.getenv('HOST', 'localhost')
 PORT = int(os.getenv('PORT', '18880'))
-
-logger = getLogger(__name__)
-handler = StreamHandler()
-handler.setLevel(DEBUG)
-logger.setLevel(DEBUG)
-logger.addHandler(handler)
 
 def recvline(sock) -> bytes:
     """Receive a line of data
@@ -29,68 +25,35 @@ def recvline(sock) -> bytes:
     data = b''
     while True:
         c = sock.recv(1)
-        if c == b'\n': break
+        if c == b'':
+            raise ConnectionRefusedError("Connection closed from client")
+        if c == b'\n':
+            break
         data += c
     return data
+
+def sendline(sock, raw):
+    assert b'\n' not in raw, "Do not include newline"
+    sock.sendall(raw + b'\n')
 
 def recv_data(sock):
     """Receive a JSON data
     """
     return json.loads(recvline(sock).decode())
 
-def send_data(sock, msg):
-    """Send JSON to client
+def send_data(sock, data):
+    """Send data to client
     """
-    msg['_result'] = 'success'
-    sock.sendall(json.dumps(msg).encode())
+    payload = {'result': 'success', 'data': data}
+    sendline(sock, json.dumps(payload).encode())
 
 def send_error(sock, msg):
     """Send error message to client
     """
-    data = {'_result': 'error', '_reason': msg}
+    data = {'result': 'error', 'reason': msg}
     sock.sendall(json.dumps(data).encode())
     sock.close()
     raise Exception(msg)
-
-# https://www.oreilly.com/library/view/python-cookbook/0596001673/ch06s04.html
-class ReadWriteLock():
-    """ A lock object that allows many simultaneous "read locks", but
-    only one "write lock." """
-
-    def __init__(self):
-        self._read_ready = threading.Condition(threading.Lock())
-        self._readers = 0
-
-    def acquire_read(self):
-        """ Acquire a read lock. Blocks only if a thread has
-        acquired the write lock. """
-        self._read_ready.acquire()
-        try:
-            self._readers += 1
-        finally:
-            self._read_ready.release()
-
-    def release_read(self):
-        """ Release a read lock. """
-        self._read_ready.acquire()
-        try:
-            self._readers -= 1
-            if not self._readers:
-                self._read_ready.notifyAll()
-        finally:
-            self._read_ready.release()
-
-    def acquire_write(self):
-        """ Acquire a write lock. Blocks until there are no
-        acquired read or write locks. """
-        self._read_ready.acquire()
-        while self._readers > 0:
-            self._read_ready.wait()
-
-    def release_write(self):
-        """ Release a write lock. """
-        self._read_ready.release()
-
 
 known_games: dict[str, GameConstructor] = {}
 known_games_lock = ReadWriteLock()
@@ -103,39 +66,33 @@ def start_game(game_class: GameConstructor, players):
 
     Start a new game
     """
-    sock_by_id = {player[0]:player[1] for player in players}
+    num_players = len(players)
+    name_by_id = {pid: player[0] for pid, player in enumerate(players)}
+    sock_by_id = {pid: player[1] for pid, player in enumerate(players)}
 
     # Initialize game
-    game = game_class(list(sock_by_id.keys()))
-    msgs = game.init()
+    game = game_class(num_players, name_by_id)
+    game.initialize()
 
-    for player_id, msg in msgs.items():
-        send_data(sock_by_id[player_id], msg)
+    # Game loop
+    logger.info(f"New game started: {game_class.name()}")
+    logger.info(f"Players:")
+    for pid in range(num_players):
+        logger.info(f"- {name_by_id[pid]}")
 
-    selector = selectors.DefaultSelector()
-    for player_id, sock in sock_by_id.items():
-        selector.register(sock, selectors.EVENT_READ, data=player_id)
+    while not game.is_over():
+        # Share current state
+        for pid in range(num_players):
+            state = game.share_state(pid)
+            logger.debug(f"Sharing state with {name_by_id[pid]}: {state}")
+            send_data(sock_by_id[pid], state)
 
-    # main loop
-    while True:
-        # polling for sending messege from them
-        events = selector.select()
-        for key, _ in events:
-            try:
-                sock, action_player = key.fileobj, key.data
-                data = recv_data(sock)  # dataが受信できていないときはsocketがcloseしてるのでshutdownしにいく
+        # Ask next move
+        # TODO
+        break
 
-                # TODO
-                if game.is_over():
-                    pass
-            except Exception as e :
-                logger.debug("error {}".format(e))
-
-    msgs = game.finish()
-    for player_id, msg in msgs.items():
-        send_data(sock_by_id[player_id], msg)
-        sock_by_id[player_id].close()
-
+    # Game over
+    # TODO
 
 def handle_connection(sock, client_host: str):
     """Handle new connection from client
@@ -168,8 +125,11 @@ def handle_connection(sock, client_host: str):
             connections[game] = []
         connections[game].append((name, sock))
 
+        # Notify the bot that it's registered
+        send_data(sock, "Registered")
+
         # Check if we can start the game
-        cnt = known_games[game].PLAYER_COUNT
+        cnt = known_games[game].min_players()
         if len(connections[game]) >= cnt:
             # Pass to game manager
             threading.Thread(
@@ -180,8 +140,7 @@ def handle_connection(sock, client_host: str):
         connections_lock.release_write()
 
     except Exception as e:
-        logger.error(f"Error: {e}")
-        logger.error(f"Connection closed ({client_host})")
+        logger.error(f"Error: {e} (Connection closed: {client_host})")
         sock.close()
         return
 
@@ -196,7 +155,9 @@ def load_game(game_dir: str) -> GameConstructor:
 
     # Import game
     module_name = f"{game_dir.replace('/', '.')}.game"
-    return importlib.import_module(module_name).Game
+    game_class = importlib.import_module(module_name).Game
+
+    return game_class
 
 def load_all(root_dir: str) -> dict[str, GameConstructor]:
     """Load every game from game root directory

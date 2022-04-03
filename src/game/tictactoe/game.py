@@ -2,8 +2,17 @@ from platform.game import GameBase
 import random
 
 class TicTacToe(GameBase):
-    def __init__(self, setting):
-        assert setting['num_players'] == 2, "Invalid number of players"
+    def __init__(self, num_players, name_by_id):
+        assert num_players == 2, "Invalid number of players"
+
+    def name():
+        return "TicTacToe"
+
+    def min_players():
+        return 2
+
+    def max_players():
+        return 2
 
     def initialize(self):
         """Initialize this game
@@ -24,14 +33,17 @@ class TicTacToe(GameBase):
         """
         # Check horizontal and vertical
         for i in range(3):
-            if self.board[i][0] == self.board[i][1] == self.board[i][2]:
+            if self.board[i][0] == self.board[i][1] == self.board[i][2] \
+               and self.board[i][0] != -1:
                 return [ 1 if self.board[i][0] == i else 0 for i in range(2) ]
-            if self.board[0][i] == self.board[1][i] == self.board[2][i]:
+            if self.board[0][i] == self.board[1][i] == self.board[2][i] \
+               and self.board[0][i] != -1:
                 return [ 1 if self.board[0][i] == i else 0 for i in range(2) ]
 
         # Check diagonal
-        if self.board[0][0] == self.board[1][1] == self.board[2][2] \
-           or self.board[0][2] == self.board[1][1] == self.board[2][0]:
+        if (self.board[0][0] == self.board[1][1] == self.board[2][2] \
+            or self.board[0][2] == self.board[1][1] == self.board[2][0]) \
+            and self.board[1][1] != -1:
             return [ 1 if self.board[1][1] == i else 0 for i in range(2) ]
 
         return False
