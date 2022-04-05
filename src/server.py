@@ -17,6 +17,20 @@ logger.level = 3
 HOST = os.getenv('HOST', 'localhost')
 PORT = int(os.getenv('PORT', '18880'))
 
+def is_alive(sock) -> bool:
+    """Check if a socket is alive
+    """
+    try:
+        sock.settimeout(3)
+        data = sock.recv(1, socket.MSG_PEEK)
+        return True
+    except BlockingIOError:
+        return False
+    except ConnectionResetError:
+        return False
+    except socket.timeout:
+        return False
+
 def recvline(sock) -> bytes:
     """Receive a line of data
 
@@ -41,10 +55,10 @@ def recv_data(sock):
     """
     return json.loads(recvline(sock).decode())
 
-def send_data(sock, data):
+def send_data(sock, data, type):
     """Send data to client
     """
-    payload = {'result': 'success', 'data': data}
+    payload = {'result': 'success', 'type': type, 'data': data}
     sendline(sock, json.dumps(payload).encode())
 
 def send_error(sock, msg):
@@ -80,52 +94,117 @@ def start_game(game_class: GameConstructor, players):
     for pid in range(num_players):
         logger.info(f"- {name_by_id[pid]}")
 
+    selector = selectors.DefaultSelector()
+    for pid in range(num_players):
+        selector.register(sock_by_id[pid], selectors.EVENT_READ, pid)
+
     no_game = False
-    while not game.is_over():
+    while True:
+        # Check if game is over
+        is_over = game.is_over()
+        for pid in range(num_players):
+            send_data(sock_by_id[pid], is_over, type='gameover')
+        if is_over: break
+
+        # Who to ask?
+        pid_list = game.next_players()
+        if not isinstance(pid_list, list):
+            raise ValueError("Invalid game implementation: "
+                             "Player ID list not given by 'next_players'")
+        if not all([0 <= pid < num_players for pid in pid_list]):
+            raise ValueError("Invalid game implementation: "
+                             "Invalid player ID given by 'next_players'")
+
         # Share current state
         for pid in range(num_players):
             state = game.share_state(pid)
             logger.debug(f"Sharing state with {name_by_id[pid]}: {state}")
             try:
-                send_data(sock_by_id[pid], state)
-            except ConnectionRefusedError:
+                send_data(sock_by_id[pid], state, type='state')
+                send_data(sock_by_id[pid], pid in pid_list, type='turn')
+            except Exception as _e:
                 # Abort game by connection error
                 no_game = True
                 break
             # TODO: ここで時間計測開始
 
-        # Who to ask?
-        pid_list = game.next_players()
-        # pid_listの正当性を確認
+        # Abort game if a client died
+        if no_game: break
 
         inputs_by_id = {}
         # Get inputs
-        # ここはselectorで同時進行recvする
+        while len(inputs_by_id) < len(pid_list):
+            events = selector.select()
+
+            for key, _ in events:
+                sock, pid = key.fileobj, key.data
+
+                # Check if it's this player's turn now
+                print(pid, pid_list)
+                if pid not in pid_list:
+                    logger.warning(f"{name_by_id[pid]} sent input on invalid turn")
+                    no_game = True
+                    break
+
+                # Check if not yet received
+                if pid in inputs_by_id:
+                    logger.warning(f"{name_by_id[pid]} sent inputs twice")
+
+                try:
+                    inputs_by_id[pid] = recv_data(sock)
+                except Exception as _e:
+                    logger.warning(f"Could not receive input from"
+                                   f"{name_by_id[pid]}")
+                    no_game = True
+                    break
+
+                # TODO: タイムアウト処理
+
+            if no_game: break
+
+        # Abort game if a client died
+        if no_game: break
 
         # Update if everyone sent the next moves
         for pid in pid_list:
-            game.update_state(pid, inputs_by_id[pid])
+            try:
+                game.update_state(pid, inputs_by_id[pid])
+            except Exception as e:
+                # TODO: 失格リストを作る
+                logger.warning(f"Invalid input from {name_by_id[pid]}: {e}")
+                no_game = True
+                break
+
+        if no_game: break
 
     if no_game:
         # Game interrupted by connection error
         payload = {"result": "abort", "reason": "Game aborted by connection error"}
-        score = {}
+        score_by_id = {}
         for pid in range(num_players):
             try:
+                if not is_alive(sock_by_id[pid]):
+                    # FIXME: Not working
+                    raise ConnectionRefusedError("Client is not alive")
+
                 sendline(sock_by_id[pid], json.dumps(payload).encode())
-                score[pid] = 0
-            except ConnectionRefusedError:
-                score[pid] = -9999 # TODO: configuable penalty
+                score_by_id[pid] = 0
+            except Exception as _e:
+                score_by_id[pid] = -9999 # TODO: configuable penalty
     else:
         # Game over
-        score = game.is_over()
+        score_by_id = game.is_over()
+        print(score_by_id)
+        if not isinstance(score_by_id, dict):
+            raise ValueError("Invalid game implementation: "
+                             "'is_over' must return score in dictionary")
 
     # Show result
     logger.info("Game result:")
     rank_by_id = {}
     rank = 1
-    for (pid, score) in sorted(score.items(), key=lambda x:-x[1]):
-        logger.info(f"{rank}. {name_by_id[pid]} (score)")
+    for (pid, score) in sorted(score_by_id.items(), key=lambda x:-x[1]):
+        logger.info(f"{rank}. {name_by_id[pid]} (score: {score})")
         rank_by_id[pid] = rank
         rank += 1
 
@@ -133,12 +212,12 @@ def start_game(game_class: GameConstructor, players):
     for pid in range(num_players):
         payload = {
             "result": "success",
-            "data": {"score": score[pid], "rank": rank_by_id[pid]}
+            "data": {"score": score_by_id[pid], "rank": rank_by_id[pid]}
         }
         try:
             sendline(sock_by_id[pid], json.dumps(payload).encode())
-        except ConnectionRefusedError:
-            logger.warn(f"Could not send game result to {name_by_id[pid]}")
+        except Exception as _e:
+            logger.warning(f"Could not send game result to {name_by_id[pid]}")
 
 def handle_connection(sock, client_host: str):
     """Handle new connection from client
@@ -172,7 +251,7 @@ def handle_connection(sock, client_host: str):
         connections[game].append((name, sock))
 
         # Notify the bot that it's registered
-        send_data(sock, "Registered")
+        send_data(sock, "Registered", type='meta')
 
         # Check if we can start the game
         cnt = known_games[game].min_players()

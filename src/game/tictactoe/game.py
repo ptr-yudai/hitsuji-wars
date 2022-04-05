@@ -35,16 +35,29 @@ class TicTacToe(GameBase):
         for i in range(3):
             if self.board[i][0] == self.board[i][1] == self.board[i][2] \
                and self.board[i][0] != -1:
-                return [ 1 if self.board[i][0] == i else 0 for i in range(2) ]
+                return { i: 1 if self.board[i][0] == i else 0
+                         for i in range(2) }
             if self.board[0][i] == self.board[1][i] == self.board[2][i] \
                and self.board[0][i] != -1:
-                return [ 1 if self.board[0][i] == i else 0 for i in range(2) ]
+                return { i: 1 if self.board[0][i] == i else 0
+                         for i in range(2) }
 
         # Check diagonal
         if (self.board[0][0] == self.board[1][1] == self.board[2][2] \
             or self.board[0][2] == self.board[1][1] == self.board[2][0]) \
             and self.board[1][1] != -1:
-            return [ 1 if self.board[1][1] == i else 0 for i in range(2) ]
+            return { i: 1 if self.board[1][1] == i else 0
+                     for i in range(2) }
+
+        # Draw
+        t = True
+        for i in range(3):
+            for j in range(3):
+                if self.board[i][j] == -1:
+                    t = False
+            if t == False: break
+        if t:
+            return { i:i for i in range(2) }
 
         return False
 
