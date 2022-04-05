@@ -21,6 +21,16 @@ class GameBase(metaclass=ABCMeta):
     def name(cls) -> str:
         pass
 
+    @classmethod
+    @abstractmethod
+    def min_players(cls) -> int:
+        pass
+
+    @classmethod
+    @abstractmethod
+    def max_players(cls) -> int:
+        pass
+
     @abstractmethod
     def initialize(self, setting:object):
         pass
